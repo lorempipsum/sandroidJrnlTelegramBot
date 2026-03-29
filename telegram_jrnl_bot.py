@@ -278,6 +278,14 @@ def telegram_download_file(token: str, file_path: str) -> bytes:
         return resp.read()
 
 
+def send_telegram_message(token: str, chat_id: int, text: str) -> None:
+    """Send a text message to a Telegram chat. Best-effort; errors are logged but not raised."""
+    try:
+        telegram_api_request(token, "sendMessage", {"chat_id": chat_id, "text": text})
+    except Exception as e:
+        logging.warning("Failed to send notification to chat %s: %s", chat_id, e)
+
+
 def resolve_timestamp(unix_ts: int, timezone_name: str | None) -> str:
     dt_utc = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
 
@@ -418,6 +426,8 @@ def detect_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def save_attachment(cfg: Config, message: dict[str, Any], media_dir: Path) -> Path | None:
+    """Download an attachment and save it locally. Returns the local path, or None if
+    there is no attachment. Raises on download/API failures so the caller can handle them."""
     attachment = detect_attachment(message)
     if not attachment:
         return None
@@ -427,13 +437,39 @@ def save_attachment(cfg: Config, message: dict[str, Any], media_dir: Path) -> Pa
         logging.warning("Attachment without file_id in message %s", message.get("message_id"))
         return None
 
-    info = telegram_api_request(cfg.telegram_bot_token, "getFile", {"file_id": file_id})
+    kind = attachment.get("kind", "file")
+    file_name = attachment.get("file_name", "unknown")
+    msg_id = message.get("message_id", "?")
+
+    try:
+        info = telegram_api_request(cfg.telegram_bot_token, "getFile", {"file_id": file_id})
+    except urllib.error.HTTPError as e:
+        logging.error(
+            "Telegram getFile failed for %s '%s' in message %s: HTTP %s %s",
+            kind, file_name, msg_id, e.code, e.reason,
+        )
+        raise
+    except Exception as e:
+        logging.error(
+            "Telegram getFile failed for %s '%s' in message %s: %s",
+            kind, file_name, msg_id, e,
+        )
+        raise
+
     file_path = info["result"]["file_path"]
-    binary = telegram_download_file(cfg.telegram_bot_token, file_path)
+
+    try:
+        binary = telegram_download_file(cfg.telegram_bot_token, file_path)
+    except Exception as e:
+        logging.error(
+            "File download failed for %s '%s' in message %s: %s",
+            kind, file_name, msg_id, e,
+        )
+        raise
 
     timestamp_token = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    base_name = sanitize_filename(str(attachment["file_name"]))
-    final_name = f"{timestamp_token}_{message.get('message_id', 'x')}_{base_name}"
+    base_name = sanitize_filename(str(file_name))
+    final_name = f"{timestamp_token}_{msg_id}_{base_name}"
     output_path = media_dir / final_name
 
     output_path.write_bytes(binary)
@@ -499,8 +535,10 @@ def process_update(cfg: Config, update: dict[str, Any], media_dir: Path, journal
     if not message:
         return
 
+    chat_id = message.get("chat", {}).get("id")
+
     if not message_allowed(message, cfg.allowed_chat_id):
-        logging.info("Skipping message from unauthorized chat_id=%s", message.get("chat", {}).get("id"))
+        logging.info("Skipping message from unauthorized chat_id=%s", chat_id)
         return
 
     unix_ts = message.get("date")
@@ -508,11 +546,46 @@ def process_update(cfg: Config, update: dict[str, Any], media_dir: Path, journal
         logging.warning("Message without date metadata. Skipping message_id=%s", message.get("message_id"))
         return
 
+    msg_id = message.get("message_id", "?")
     ts_label = resolve_timestamp(int(unix_ts), cfg.timezone_name)
     text = extract_message_text(message)
-    attachment_path = save_attachment(cfg, message, media_dir)
 
-    content = build_entry_content(text, attachment_path, cfg)
+    attachment_path = None
+    attachment_failed = False
+    try:
+        attachment_path = save_attachment(cfg, message, media_dir)
+    except urllib.error.HTTPError as e:
+        attachment_failed = True
+        attachment = detect_attachment(message)
+        kind = attachment.get("kind", "file") if attachment else "file"
+        if e.code == 400:
+            reason = (
+                f"Could not download your {kind} (message {msg_id}). "
+                "The file is likely too large for the Telegram Bot API (~20 MB limit)."
+            )
+        else:
+            reason = (
+                f"Could not download your {kind} (message {msg_id}). "
+                f"Telegram returned HTTP {e.code} {e.reason}."
+            )
+        logging.error("Attachment download failed for message %s: HTTP %s %s", msg_id, e.code, e.reason)
+        if chat_id:
+            send_telegram_message(cfg.telegram_bot_token, chat_id, reason)
+    except Exception as e:
+        attachment_failed = True
+        attachment = detect_attachment(message)
+        kind = attachment.get("kind", "file") if attachment else "file"
+        reason = f"Could not download your {kind} (message {msg_id}): {e}"
+        logging.error("Attachment download failed for message %s: %s", msg_id, e)
+        if chat_id:
+            send_telegram_message(cfg.telegram_bot_token, chat_id, reason)
+
+    if attachment_failed and not text:
+        # Nothing useful to journal — the attachment was the entire message.
+        content = ""
+    else:
+        content = build_entry_content(text, attachment_path, cfg)
+
     append_journal_entry(journal_file, ts_label, content)
 
     # If using rclone remote, upload the journal file after appending the entry so
@@ -550,7 +623,15 @@ def poll_forever(cfg: Config, base_dir: Path) -> None:
             if updates:
                 for update in updates:
                     update_id = int(update["update_id"])
-                    process_update(cfg, update, media_dir, journal_file)
+                    try:
+                        process_update(cfg, update, media_dir, journal_file)
+                    except Exception as e:
+                        logging.error(
+                            "Failed to process update %s: %s", update_id, e,
+                        )
+                        traceback.print_exc()
+                    # Always advance the offset so the bot doesn't retry the same
+                    # failed message forever.
                     last_update_id = max(last_update_id, update_id)
 
                 state["last_update_id"] = last_update_id
