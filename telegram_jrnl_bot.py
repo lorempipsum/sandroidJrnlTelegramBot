@@ -115,7 +115,29 @@ class SingleInstanceLock:
             self._lock_path = lock_path
             return True
         except FileExistsError:
-            return False
+            # Lock file exists — check whether the owning process is still alive.
+            try:
+                old_pid_str = lock_path.read_text(encoding="utf-8").strip()
+                old_pid = int(old_pid_str)
+                os.kill(old_pid, 0)  # signal 0 = existence check only
+                # Process is alive → genuine duplicate instance.
+                return False
+            except (ValueError, ProcessLookupError, OSError):
+                # PID missing/invalid or process is dead → stale lock.
+                logging.warning("Removing stale lock file %s", lock_path)
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    return False
+                # Retry the exclusive create now that the stale file is gone.
+                try:
+                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    os.write(fd, str(os.getpid()).encode("utf-8"))
+                    self._lock_fd = fd
+                    self._lock_path = lock_path
+                    return True
+                except FileExistsError:
+                    return False
 
     def _release_lock_file(self) -> None:
         if self._lock_fd is not None:
