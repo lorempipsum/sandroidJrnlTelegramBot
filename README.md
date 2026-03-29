@@ -66,3 +66,69 @@ Useful commands:
 - Logs:
   - `logs/telegram_jrnl_bot.log`
   - `logs/startup-wrapper.log`
+
+  ## Running on Linux / DigitalOcean (simple options)
+
+  This repository is cross-platform. On a Linux droplet the easiest ways to have the bot write into OneDrive are:
+
+  A) Mount your OneDrive with rclone and point `ONEDRIVE_DIR` at the mountpoint (recommended).
+
+  - Install rclone: `curl https://rclone.org/install.sh | sudo bash` (or use your package manager).
+  - Run `rclone config` and create a remote called e.g. `onedrive` following the interactive prompts.
+  - Mount the remote (temporary):
+
+  ```sh
+  rclone mount onedrive: /mnt/onedrive --daemon
+  ```
+
+  - Set `ONEDRIVE_DIR=/mnt/onedrive` in `.env` and run the bot (see systemd below).
+
+  B) Or keep a local folder and let the bot push files using rclone after every write.
+
+  - Set `RCLONE_REMOTE` in `.env` to the rclone remote prefix you created, e.g. `onedrive:my-jrnl`.
+  - The bot will call `rclone copyto` to upload attachments and the journal file after each change.
+  - Optionally set `RCLONE_REMOVE_LOCAL=true` to remove the local copy after a successful upload.
+
+  Example minimal `.env` (see `.env.example` in the repo):
+
+  ```
+  TELEGRAM_BOT_TOKEN="<your-token>"
+  ONEDRIVE_DIR="/home/youruser/sandroidJrnlTelegramBot/onedrive"
+  # Optional rclone upload instead of a mount
+  # RCLONE_REMOTE="onedrive:telegram-jrnl"
+  # RCLONE_REMOVE_LOCAL=false
+  # Optional: TELEGRAM_ALLOWED_CHAT_ID=123456789
+  # Optional: TIMEZONE=Europe/Berlin
+  ```
+
+  Systemd unit example (copy to `/etc/systemd/system/telegram-jrnl.service` and edit `User` and `WorkingDirectory`):
+
+  ```
+  [Unit]
+  Description=Telegram Jrnl Bot
+  After=network-online.target
+
+  [Service]
+  Type=simple
+  User=youruser
+  WorkingDirectory=/home/youruser/sandroidJrnlTelegramBot
+  EnvironmentFile=/home/youruser/sandroidJrnlTelegramBot/.env
+  ExecStart=/usr/bin/env python3 telegram_jrnl_bot.py
+  Restart=on-failure
+  RestartSec=5
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  After adding the unit run:
+
+  ```sh
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now telegram-jrnl.service
+  sudo journalctl -u telegram-jrnl -f
+  ```
+
+  Notes:
+  - If you use an rclone mount, ensure the mount unit starts before this service (use `After=`/`Wants=` in the unit file).
+  - The bot uses only the Python standard library; no extra pip packages are required unless you add them.

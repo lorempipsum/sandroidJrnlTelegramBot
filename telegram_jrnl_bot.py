@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import traceback
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,7 @@ from typing import Any
 class Config:
     telegram_bot_token: str
     onedrive_dir: Path
+    onedrive_remote: str | None
     journal_file_name: str
     media_subdir: str
     poll_timeout_seconds: int
@@ -170,9 +172,14 @@ def load_config(base_dir: Path) -> Config:
     if not token:
         raise ValueError("Missing TELEGRAM_BOT_TOKEN in .env or environment")
 
-    onedrive_dir_raw = getenv(env, "ONEDRIVE_DIR")
-    if not onedrive_dir_raw:
-        raise ValueError("Missing ONEDRIVE_DIR in .env or environment")
+    # Support two modes: a local OneDrive-synced folder (ONEDRIVE_DIR) or an rclone
+    # remote (ONEDRIVE_REMOTE). If a remote is provided, we create a small local
+    # staging directory for files that will be uploaded by rclone.
+    onedrive_dir_raw = getenv(env, "ONEDRIVE_DIR", "") or ""
+    onedrive_remote = getenv(env, "ONEDRIVE_REMOTE", "") or None
+
+    if not onedrive_dir_raw and not onedrive_remote:
+        raise ValueError("Missing ONEDRIVE_DIR or ONEDRIVE_REMOTE in .env or environment")
 
     journal_file_name = getenv(env, "JOURNAL_FILE_NAME", "telegram-jrnl.txt") or "telegram-jrnl.txt"
     media_subdir = getenv(env, "MEDIA_SUBDIR", "jrnl-media") or "jrnl-media"
@@ -185,9 +192,16 @@ def load_config(base_dir: Path) -> Config:
 
     timezone_name = getenv(env, "TIMEZONE", "") or None
 
+    if onedrive_dir_raw:
+        onedrive_dir = Path(onedrive_dir_raw).expanduser()
+    else:
+        # local staging dir for rclone uploads
+        onedrive_dir = base_dir / ".onedrive_local"
+
     return Config(
         telegram_bot_token=token,
-        onedrive_dir=Path(onedrive_dir_raw).expanduser(),
+        onedrive_dir=onedrive_dir,
+        onedrive_remote=onedrive_remote,
         journal_file_name=journal_file_name,
         media_subdir=media_subdir,
         poll_timeout_seconds=poll_timeout_seconds,
@@ -296,10 +310,53 @@ def sanitize_filename(name: str) -> str:
     return safe or "attachment"
 
 
-def markdown_link(file_path: Path) -> str:
+
+def rclone_copy(local_path: Path, remote_dest: str) -> bool:
+    """Copy a local file to an rclone remote path using `rclone copyto`.
+
+    remote_dest must be a full rclone destination (e.g. "onedrive:myfolder/file.txt").
+    Returns True on success.
+    """
+    try:
+        result = subprocess.run(
+            ["rclone", "copyto", str(local_path), remote_dest],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        logging.error("rclone not found in PATH. Install rclone to use ONEDRIVE_REMOTE mode.")
+        return False
+
+    if result.returncode != 0:
+        logging.error("rclone failed to copy %s to %s: %s", local_path, remote_dest, result.stderr.strip())
+        return False
+
+    logging.info("rclone copied %s to %s", local_path, remote_dest)
+    return True
+
+
+def markdown_link(file_path: Path, cfg: Config | None = None) -> str:
+    """Return a markdown link appropriate for the deployment mode.
+
+    - If running with ONEDRIVE_REMOTE, return a relative path under the media subdir
+      so links work when the journal and media are stored together in OneDrive.
+    - If running with a local ONEDRIVE_DIR, prefer a relative path under that dir.
+    - Otherwise, return an absolute posix path.
+    """
     name = file_path.name
-    markdown_path = file_path.as_posix()
-    return f"[{name}]({markdown_path})"
+    if cfg and cfg.onedrive_remote:
+        return f"[{name}]({cfg.media_subdir}/{name})"
+
+    if cfg:
+        try:
+            rel = file_path.relative_to(cfg.onedrive_dir)
+            return f"[{name}]({rel.as_posix()})"
+        except Exception:
+            pass
+
+    return f"[{name}]({file_path.as_posix()})"
 
 
 def detect_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -378,6 +435,15 @@ def save_attachment(cfg: Config, message: dict[str, Any], media_dir: Path) -> Pa
 
     output_path.write_bytes(binary)
     logging.info("Saved attachment to %s", output_path)
+    # If configured to use rclone/OneDrive remote, upload the file.
+    if cfg.onedrive_remote:
+        remote_base = cfg.onedrive_remote.rstrip("/")
+        remote_dest = f"{remote_base}/{cfg.media_subdir}/{final_name}"
+        if not rclone_copy(output_path, remote_dest):
+            logging.warning("Failed to upload attachment %s to remote %s", output_path, remote_dest)
+        else:
+            logging.info("Uploaded attachment to remote %s", remote_dest)
+
     return output_path
 
 
@@ -393,12 +459,12 @@ def extract_message_text(message: dict[str, Any]) -> str:
     return ""
 
 
-def build_entry_content(text: str, attachment_path: Path | None) -> str:
+def build_entry_content(text: str, attachment_path: Path | None, cfg: Config) -> str:
     if attachment_path and text:
-        return f"{text} {markdown_link(attachment_path)}"
+        return f"{text} {markdown_link(attachment_path, cfg)}"
 
     if attachment_path and not text:
-        return f"sent file {markdown_link(attachment_path)}"
+        return f"sent file {markdown_link(attachment_path, cfg)}"
 
     if text:
         return text
@@ -440,8 +506,18 @@ def process_update(cfg: Config, update: dict[str, Any], media_dir: Path, journal
     text = extract_message_text(message)
     attachment_path = save_attachment(cfg, message, media_dir)
 
-    content = build_entry_content(text, attachment_path)
+    content = build_entry_content(text, attachment_path, cfg)
     append_journal_entry(journal_file, ts_label, content)
+
+    # If using rclone remote, upload the journal file after appending the entry so
+    # the remote copy stays up-to-date.
+    if cfg.onedrive_remote:
+        remote_base = cfg.onedrive_remote.rstrip("/")
+        remote_dest = f"{remote_base}/{cfg.journal_file_name}"
+        if not rclone_copy(journal_file, remote_dest):
+            logging.warning("Failed to upload journal %s to remote %s", journal_file, remote_dest)
+        else:
+            logging.info("Uploaded journal to remote %s", remote_dest)
 
     if content:
         logging.info("Appended entry: %s", content[:120])
@@ -509,8 +585,13 @@ def main() -> int:
 
     try:
         logging.info("Single-instance lock acquired: %s", instance_id)
-        logging.info("Journal file: %s", cfg.onedrive_dir / cfg.journal_file_name)
-        logging.info("Media folder: %s", cfg.onedrive_dir / cfg.media_subdir)
+        if cfg.onedrive_remote:
+            logging.info("Using rclone remote: %s", cfg.onedrive_remote)
+            logging.info("Local staging directory: %s", cfg.onedrive_dir)
+            logging.info("Remote journal: %s/%s", cfg.onedrive_remote, cfg.journal_file_name)
+        else:
+            logging.info("Journal file: %s", cfg.onedrive_dir / cfg.journal_file_name)
+            logging.info("Media folder: %s", cfg.onedrive_dir / cfg.media_subdir)
 
         poll_forever(cfg, base_dir)
         return 0
