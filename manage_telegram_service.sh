@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Script to reload systemd daemon, enable+start the telegram-jrnl service, and follow its journal.
+# Script to reload systemd daemon, enable+restart the telegram_jrnl service, and follow its journal.
 # Usage: ./manage_telegram_service.sh  (or: bash manage_telegram_service.sh)
 
-SERVICE_NAME="telegram-jrnl"
+SERVICE_NAME="telegram_jrnl"
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "Error: systemctl not found. This script must be run on a systemd Linux host." >&2
@@ -20,8 +20,11 @@ fi
 echo "Reloading systemd daemon..."
 $SUDO systemctl daemon-reload
 
-echo "Enabling and starting ${SERVICE_NAME}..."
+echo "Enabling ${SERVICE_NAME}..."
 $SUDO systemctl enable --now "${SERVICE_NAME}.service"
+
+echo "Restarting ${SERVICE_NAME} to apply latest .env and unit changes..."
+$SUDO systemctl restart "${SERVICE_NAME}.service"
 
 echo "Tailing journal for ${SERVICE_NAME} (press Ctrl+C to exit)..."
 exec $SUDO journalctl -u "${SERVICE_NAME}" -f

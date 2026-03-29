@@ -48,8 +48,11 @@ EOF
 echo "Reloading systemd ..."
 sudo systemctl daemon-reload
 
-echo "Enabling and starting ${SERVICE_NAME} ..."
+echo "Enabling ${SERVICE_NAME} ..."
 sudo systemctl enable --now "${SERVICE_NAME}.service"
+
+echo "Restarting ${SERVICE_NAME} to apply latest .env and unit changes ..."
+sudo systemctl restart "${SERVICE_NAME}.service"
 
 echo "Done. Tailing logs (Ctrl+C to stop):"
 sudo journalctl -u "$SERVICE_NAME" -f

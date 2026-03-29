@@ -91,6 +91,12 @@ sudo systemctl enable --now telegram_jrnl.service
 sudo journalctl -u telegram_jrnl -f
 ```
 
+If you edit `.env` later (for example `JOURNAL_FILE_NAME`), restart the service to apply the new values:
+
+```bash
+sudo systemctl restart telegram_jrnl.service
+```
+
 6) Notes and behaviour
 
 - When `ONEDRIVE_REMOTE` is used, attachments are uploaded to `<remote>/<path>/jrnl-media/<filename>` and the journal file is uploaded to `<remote>/<path>/<JOURNAL_FILE_NAME>`.
