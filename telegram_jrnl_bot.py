@@ -30,6 +30,7 @@ class Config:
     telegram_bot_token: str
     onedrive_dir: Path
     onedrive_remote: str | None
+    rclone_remove_local: bool
     journal_file_name: str
     media_subdir: str
     poll_timeout_seconds: int
@@ -177,6 +178,7 @@ def load_config(base_dir: Path) -> Config:
     # staging directory for files that will be uploaded by rclone.
     onedrive_dir_raw = getenv(env, "ONEDRIVE_DIR", "") or ""
     onedrive_remote = getenv(env, "ONEDRIVE_REMOTE", "") or None
+    rclone_remove_local = (getenv(env, "RCLONE_REMOVE_LOCAL", "") or "").lower() in ("true", "1", "yes")
 
     if not onedrive_dir_raw and not onedrive_remote:
         raise ValueError("Missing ONEDRIVE_DIR or ONEDRIVE_REMOTE in .env or environment")
@@ -202,6 +204,7 @@ def load_config(base_dir: Path) -> Config:
         telegram_bot_token=token,
         onedrive_dir=onedrive_dir,
         onedrive_remote=onedrive_remote,
+        rclone_remove_local=rclone_remove_local,
         journal_file_name=journal_file_name,
         media_subdir=media_subdir,
         poll_timeout_seconds=poll_timeout_seconds,
@@ -443,6 +446,9 @@ def save_attachment(cfg: Config, message: dict[str, Any], media_dir: Path) -> Pa
             logging.warning("Failed to upload attachment %s to remote %s", output_path, remote_dest)
         else:
             logging.info("Uploaded attachment to remote %s", remote_dest)
+            if cfg.rclone_remove_local:
+                output_path.unlink(missing_ok=True)
+                logging.info("Removed local attachment %s", output_path)
 
     return output_path
 

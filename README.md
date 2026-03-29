@@ -85,9 +85,9 @@ Useful commands:
 
   B) Or keep a local folder and let the bot push files using rclone after every write.
 
-  - Set `RCLONE_REMOTE` in `.env` to the rclone remote prefix you created, e.g. `onedrive:my-jrnl`.
+  - Set `ONEDRIVE_REMOTE` in `.env` to the rclone remote prefix you created, e.g. `onedrive:my-jrnl`.
   - The bot will call `rclone copyto` to upload attachments and the journal file after each change.
-  - Optionally set `RCLONE_REMOVE_LOCAL=true` to remove the local copy after a successful upload.
+  - Optionally set `RCLONE_REMOVE_LOCAL=true` to delete local media files after a successful upload (saves disk space on the server).
 
   Example minimal `.env` (see `.env.example` in the repo):
 
@@ -95,7 +95,7 @@ Useful commands:
   TELEGRAM_BOT_TOKEN="<your-token>"
   ONEDRIVE_DIR="/home/youruser/sandroidJrnlTelegramBot/onedrive"
   # Optional rclone upload instead of a mount
-  # RCLONE_REMOTE="onedrive:telegram-jrnl"
+  # ONEDRIVE_REMOTE="onedrive:telegram-jrnl"
   # RCLONE_REMOVE_LOCAL=false
   # Optional: TELEGRAM_ALLOWED_CHAT_ID=123456789
   # Optional: TIMEZONE=Europe/Berlin
